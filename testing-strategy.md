@@ -265,3 +265,64 @@ All 33 tests pass green. Tests covering known bugs use `test.fail()` — they wi
 - Frontend empty/whitespace submit prevention (backend coverage exists in API layer)
 
 Architecture: Page Object Model with custom Playwright fixtures, component objects, and a centralized API client with automatic test data cleanup. See [tests/](tests/) and [README.md](README.md).
+
+---
+
+## 10. CI Quarantine Strategy
+
+Tests that fail intermittently (flaky) or fail due to known, unresolved bugs should not block the CI pipeline for unrelated changes. This section defines how such tests are managed.
+
+### 10.1 Known Bug Tests vs. Quarantined Tests
+
+| Category | Mechanism | Pipeline Impact | Example |
+|----------|-----------|-----------------|---------|
+| **Known bug** | `test.fail()` | Passes green — no pipeline impact | API returns 200 instead of 201; bug is logged, test expects the failure |
+| **Quarantined** | `@quarantine` tag + separate CI project | Excluded from the main pipeline; runs in a parallel reporting job | Flaky UI test that fails 1 in 10 runs due to timing |
+
+`test.fail()` is used when a test reliably demonstrates a known defect — the assertion is inverted, so the test passes today and will start failing (alerting the team) once the bug is fixed. Quarantine is for tests whose failures are **unpredictable** and cannot be addressed immediately.
+
+### 10.2 Quarantine Workflow
+
+1. **Identify** — A test fails intermittently on CI (not reproducible locally, or tied to environment instability).
+2. **Tag** — Add `{ tag: '@quarantine' }` to the test and open a tracking ticket with the failure pattern, logs, and frequency.
+3. **Isolate** — The main CI pipeline uses `--grep-invert @quarantine` to exclude tagged tests. A separate scheduled job runs quarantined tests and reports results without blocking merges.
+4. **Investigate** — Quarantined tests are reviewed weekly. Root causes are identified and fixed (timing issues, shared state, environment flakiness).
+5. **Restore** — Once stable for 5 consecutive CI runs, the `@quarantine` tag is removed and the test re-enters the main pipeline.
+
+### 10.3 CI Configuration
+
+The main pipeline rejects quarantined tests:
+
+```yaml
+- name: Run API tests
+  run: npx playwright test --project=api --grep-invert @quarantine
+
+- name: Run UI tests
+  run: npx playwright test --project=ui --grep-invert @quarantine
+```
+
+A separate scheduled job monitors quarantined tests:
+
+```yaml
+quarantine-report:
+  runs-on: ubuntu-latest
+  schedule:
+    - cron: '0 6 * * 1-5'  # Weekdays at 06:00 UTC
+  steps:
+    # ... setup steps ...
+    - name: Run quarantined tests
+      run: npx playwright test --grep @quarantine
+      continue-on-error: true
+
+    - name: Upload quarantine report
+      uses: actions/upload-artifact@v4
+      with:
+        name: quarantine-report
+        path: playwright-report/
+```
+
+### 10.4 Guardrails
+
+- **Maximum quarantine duration:** 2 weeks. If a test cannot be stabilized within that window, it must be either rewritten or permanently removed with a justification in the tracking ticket.
+- **Quarantine cap:** No more than 10% of the total test suite may be quarantined at any time. Exceeding this threshold signals a systemic reliability problem that must be addressed before new tests are added.
+- **No silent quarantines:** Every quarantined test must have a linked ticket. Untracked quarantines are treated as test gaps during review.
