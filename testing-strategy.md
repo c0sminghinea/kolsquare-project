@@ -326,3 +326,131 @@ quarantine-report:
 - **Maximum quarantine duration:** 2 weeks. If a test cannot be stabilized within that window, it must be either rewritten or permanently removed with a justification in the tracking ticket.
 - **Quarantine cap:** No more than 10% of the total test suite may be quarantined at any time. Exceeding this threshold signals a systemic reliability problem that must be addressed before new tests are added.
 - **No silent quarantines:** Every quarantined test must have a linked ticket. Untracked quarantines are treated as test gaps during review.
+
+---
+
+## 11. Retry Policy
+
+Playwright retries are configured as the first line of defense against transient failures before quarantining is considered.
+
+### Current Configuration
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| `retries` | 2 | Tolerates up to 2 transient failures before marking a test as failed |
+| `trace` | `on-first-retry` | Captures execution trace on first retry for debugging without storage overhead on every run |
+| `screenshot` | `only-on-failure` (UI) | Captures visual state at the point of failure |
+| `video` | `on-first-retry` (UI) | Records video on retry to help diagnose timing-dependent UI failures |
+
+### Retry vs. Quarantine Decision Tree
+
+1. Test fails on CI → Playwright retries up to 2 times automatically.
+2. Test passes on retry → Counted as **flaky**. Playwright's HTML report flags it. No immediate action, but monitor frequency.
+3. Test fails all retries → Marked as **failed**. Pipeline fails.
+4. Same test fails intermittently across multiple CI runs → Candidate for **quarantine** (Section 10).
+
+### Flaky Test Monitoring
+
+Tests that pass only on retry are logged by Playwright's built-in flaky detection. A test that appears as flaky in more than 3 CI runs within a week should be investigated — not quarantined immediately, but root-caused. Common causes:
+
+- Animation or rendering timing (→ add `waitFor` or use `toBeVisible` assertions)
+- Shared environment data interference (→ improve test isolation)
+- Network latency (→ increase specific timeouts, not global ones)
+
+---
+
+## 12. Reporting and Metrics
+
+### CI Artifacts
+
+Every CI run produces three report formats, all uploaded as GitHub Actions artifacts:
+
+| Artifact | Format | Purpose |
+|----------|--------|---------|
+| `playwright-report/` | HTML | Interactive drill-down: test steps, screenshots, traces, video |
+| `test-results/results.xml` | JUnit XML | Machine-readable for CI dashboards, trend tools, and PR status checks |
+| `test-results/` | Directory | Raw failure artifacts: screenshots, error context files |
+
+The **Playwright HTML report** is the primary artifact for investigating failures. It includes step-by-step execution, attached traces (on retries), and screenshots/video for UI tests.
+
+### Key Metrics to Track
+
+| Metric | Source | Threshold |
+|--------|--------|-----------|
+| Pass rate | JUnit XML | ≥ 95% (excluding `test.fail()` known bugs) |
+| Flaky rate | Playwright HTML report (flaky flag) | < 5% of total tests per week |
+| Execution time | CI job duration | API: < 2 min, UI: < 5 min |
+| Quarantine count | Tagged tests | < 10% of suite (Section 10.4) |
+| `test.fail()` annotation count | Codebase grep | Reviewed monthly; should trend downward as bugs are fixed |
+
+### Communication
+
+- **Per-run:** GitHub Actions status check on PRs (pass/fail). Developers inspect the HTML report artifact on failure.
+- **Weekly:** Quick review of flaky test trends and quarantine status during team standup or async summary.
+- **Monthly:** `test.fail()` annotations reviewed — if the underlying bug has been fixed, the test will have started failing (Playwright inverts the expectation), which signals it should be converted to a normal assertion.
+
+---
+
+## 13. Test Maintenance and Ownership
+
+### Ownership Model
+
+| Responsibility | Owner |
+|----------------|-------|
+| Test suite health (green pipeline, flaky investigation) | QA Engineer |
+| Updating tests when feature behavior changes | Developer who makes the change + QA review |
+| Quarantine triage and restoration | QA Engineer (weekly) |
+| `test.fail()` review and cleanup | QA Engineer (monthly) |
+
+### Maintenance Cadence
+
+| Activity | Frequency | Action |
+|----------|-----------|--------|
+| `test.fail()` audit | Monthly | Grep for `test.fail()` annotations. Check linked bugs — if fixed, remove annotation and update assertion. If stale (> 3 months, no progress), escalate. |
+| Quarantine review | Weekly | Review quarantined tests per Section 10.2. Restore stable ones, rewrite or remove expired ones. |
+| Dead test check | Quarterly | Identify tests that no longer map to existing feature behavior. Remove or update. |
+| Dependency updates | Monthly | Update Playwright version. Run full suite and verify no new failures from browser engine changes. |
+
+### When Feature Changes
+
+When a product change modifies Notes behavior:
+
+1. Developer updates or removes affected tests as part of the feature PR.
+2. QA reviews the PR to ensure coverage is maintained — new behavior has tests, removed behavior has tests deleted.
+3. If `test.fail()` tests are affected (the bug they tracked is now "fixed by redesign"), the annotation is removed.
+
+---
+
+## 14. Traceability Matrix
+
+Maps feature requirements (Section 4) to automated test coverage (Section 9) and identifies areas covered only by manual testing.
+
+| Feature Area | Requirement | Automated Coverage | Manual Coverage |
+|-------------|-------------|-------------------|-----------------|
+| **4.1 Note CRUD** | Create note via modal | `ui/note-lifecycle.spec.ts`, `api/notes-crud.spec.ts` | — |
+| | Read notes in feed | `ui/data-display.spec.ts`, `api/notes-crud.spec.ts` | — |
+| | Edit note, `updatedAt` updates | `ui/note-lifecycle.spec.ts`, `api/notes-crud.spec.ts` | — |
+| | Delete note with confirmation | `ui/note-lifecycle.spec.ts`, `api/notes-crud.spec.ts` | — |
+| **4.2 Reply Threading** | Reply attached to parent | `ui/reply-threading.spec.ts`, `api/reply-threading.spec.ts` | — |
+| | Auto-collapse > 2 replies | `ui/reply-threading.spec.ts` | — |
+| | Expand collapsed thread | `ui/reply-threading.spec.ts` | — |
+| | Cascade delete | `api/reply-threading.spec.ts` | — |
+| **4.3 Input Validation** | Empty content rejected | `api/input-validation.spec.ts` | Frontend: manual/unit |
+| | Whitespace-only rejected | `api/input-validation.spec.ts` | Frontend: manual/unit |
+| | Over 255 chars rejected | `api/input-validation.spec.ts` | Frontend: manual/unit |
+| **4.4 Data Display** | `createdAt` shown | `ui/data-display.spec.ts` | — |
+| | "Last Edited" on modified notes | `ui/data-display.spec.ts` | — |
+| | Author name and avatar | `ui/data-display.spec.ts` | — |
+| | Chronological ordering | `api/notes-crud.spec.ts` | Visual: manual |
+| **4.5 User Assignment** | Random user from predefined list | `api/api-contract.spec.ts` | — |
+| | Valid avatar URL | `api/api-contract.spec.ts` | Visual: manual |
+| **API Contract** | Correct status codes | `api/api-contract.spec.ts` | — |
+| | Response schema consistency | `api/api-contract.spec.ts` | — |
+| **Modal Behavior** | State reset between operations | `ui/modal-behavior.spec.ts` | — |
+| | Modal titles and button text | — | Manual / unit test |
+| **Accessibility** | Keyboard navigation, focus, contrast | — | Manual (Section 5.7) |
+| **XSS / Injection** | Script injection sanitized | — | Exploratory (Section 5.4) |
+| **Cross-browser** | Firefox, Safari, Edge | — | Manual (Section 5.6) |
+| **Responsive** | 320–1440px viewports | — | Manual (Section 5.6) |
+
+**Coverage summary:** 33 automated tests cover all core CRUD, threading, validation, contract, and data display requirements. Accessibility, cross-browser, responsive design, frontend validation, and XSS are covered by manual testing and exploratory charters.
